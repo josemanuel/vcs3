@@ -400,6 +400,9 @@ function boot(mount) {
   const phraseTimers = [];
   let dirty = false;
   let frame = 0;
+  let poly = false;
+  let noteSerial = 1;
+  let attackToken = 0;
   let seqPlaying = false;
   let seqTempo = 120;
   let seqRun = 0;
@@ -505,6 +508,8 @@ function boot(mount) {
     seqTempo = clamp(Math.round(Number(event.target.value) || 120), 40, 240);
     markDirty();
   });
+  mount.querySelector("#mode-mono").addEventListener("click", () => setPoly(false));
+  mount.querySelector("#mode-poly").addEventListener("click", () => setPoly(true));
   mount.querySelector("#oct-down").addEventListener("click", () => shiftOctave(-12));
   mount.querySelector("#oct-up").addEventListener("click", () => shiftOctave(12));
   mount.querySelector("#mute1").addEventListener("click", () => toggleMute(1));
@@ -658,9 +663,11 @@ function boot(mount) {
               <button class="btn" id="oct-down" type="button">Oct −</button>
               <strong id="range-label">C3 – C5</strong>
               <button class="btn" id="oct-up" type="button">Oct +</button>
+              <button class="btn primary" id="mode-mono" type="button">Mono</button>
+              <button class="btn" id="mode-poly" type="button">Poly</button>
               <button class="btn primary" id="try-patch" type="button">Probar</button>
             </div>
-            <span>Monofónico · última nota</span>
+            <span id="voice-hint">Última nota</span>
           </div>
           <div class="keys" id="keys"></div>
         </section>
@@ -682,7 +689,7 @@ function boot(mount) {
         <ul>
           <li>Elige un pin y pulsa un agujero. Otro clic con el mismo color lo quita.</li>
           <li>Para oír el teclado, la fila IN 1 / KYBD tiene que llegar a OSC 1 FREQ (el lead ya lo trae).</li>
-          <li>Arrastra el dedo por el teclado para ligar notas. Probar toca una frase con el patch actual.</li>
+          <li>Arrastra el dedo por el teclado para ligar. Mono es la última nota. Poly tiene 4 voces, cada una con su filtro y su envolvente; el oscilador 3 y la reverberación son comunes.</li>
           <li>La envolvente no es un ADSR: Attack, On (tiempo), Decay y Off. ON = 10 sostiene la tecla.</li>
           <li>Sube Response a tope y el filtro canta solo. El patch «Filtro que canta» lo hace en bucle.</li>
           <li>Los patches viven en este navegador. Exportar guarda un JSON, incluidos los pasos del secuenciador.</li>
@@ -752,6 +759,7 @@ function boot(mount) {
     paintMode();
     paintKeys();
     paintSeq();
+    paintVoices();
     rangeEl.textContent = `${noteName(baseNote)} – ${noteName(baseNote + 24)}`;
   }
 
@@ -938,6 +946,7 @@ function boot(mount) {
       button.setPointerCapture?.(event.pointerId);
       attackHeld = true;
       button.classList.add("down");
+      attackToken += 1;
       trigger += 1;
       syncGate(true);
     };
@@ -1004,9 +1013,11 @@ function boot(mount) {
 
   function noteOn(midi, vel, id, legato = false) {
     if (!String(id).startsWith("p:")) cancelPhrase();
+    const prev = notes.get(id);
+    const token = legato && prev ? prev.token : ++noteSerial;
     if (notes.has(id)) noteOff(id, true);
     if (sustained.has(id)) sustained.delete(id);
-    notes.set(id, { midi, vel });
+    notes.set(id, { midi, vel, token });
     order.push(id);
     currentNote = midi;
     currentVel = vel;
@@ -1044,6 +1055,19 @@ function boot(mount) {
     gate = attackHeld || order.length > 0;
     if (retrigger) trigger += 0;
     sendNow();
+  }
+
+  function paintVoices() {
+    mount.querySelector("#mode-mono").classList.toggle("primary", !poly);
+    mount.querySelector("#mode-poly").classList.toggle("primary", poly);
+    mount.querySelector("#voice-hint").textContent = poly ? "4 voces" : "Última nota";
+  }
+
+  function setPoly(next) {
+    poly = next;
+    paintVoices();
+    sendNow();
+    setStatus(poly ? "Poly: 4 voces, filtro y envolvente por nota." : "Mono: última nota.");
   }
 
   function onKeyDown(event) {
@@ -1250,6 +1274,13 @@ function boot(mount) {
       mute1,
       mute2,
       trigger,
+      poly: poly ? 1 : 0,
+      attack: attackHeld ? 1 : 0,
+      attackToken,
+      chord: order.map((id) => {
+        const item = notes.get(id);
+        return { id, n: item.midi, v: item.vel, token: item.token };
+      }),
       seqPlaying,
       seqTempo,
       seqRun,
