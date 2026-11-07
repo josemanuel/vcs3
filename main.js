@@ -79,6 +79,15 @@ const DEFAULTS = {
   "stick.ry": 5,
   "master": 7.2,
   "glide": 0,
+  "fx.drive": 0,
+  "fx.delay.time": 4.2,
+  "fx.delay.fb": 3.6,
+  "fx.delay.mix": 0,
+  "fx.chorus.rate": 3.2,
+  "fx.chorus.depth": 5,
+  "fx.chorus.mix": 0,
+  "seq.gate": 6,
+  "seq.swing": 0,
 };
 
 const DEFAULT_MIDI = {
@@ -91,6 +100,10 @@ const DEFAULT_MIDI = {
   70: "reverb.mix",
   7: "master",
   1: "stick.y",
+  91: "fx.delay.mix",
+  93: "fx.drive",
+  94: "fx.delay.time",
+  95: "fx.chorus.mix",
 };
 
 const KEY_INDEX = {
@@ -333,6 +346,12 @@ const FACTORY = [
   },
 ];
 
+function defaultSteps() {
+  const notes = [60, 60, 64, 67, 72, 67, 64, 60, 62, 65, 69, 65, 60, 64, 67, 72];
+  const on = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1];
+  return notes.map((note, index) => ({ on: !!on[index], note }));
+}
+
 function mountPutney(target) {
   const root = target || document.getElementById("vcs3-root");
   if (!root || root.querySelector(".putney")) return;
@@ -381,6 +400,14 @@ function boot(mount) {
   const phraseTimers = [];
   let dirty = false;
   let frame = 0;
+  let poly = false;
+  let noteSerial = 1;
+  let attackToken = 0;
+  let seqPlaying = false;
+  let seqTempo = 120;
+  let seqRun = 0;
+  let seqIndex = -1;
+  let steps = defaultSteps();
 
   mount.innerHTML = shell();
   const status = mount.querySelector("#status");
@@ -402,6 +429,7 @@ function boot(mount) {
 
   buildMatrix();
   buildKeys();
+  buildSteps();
   mount.querySelectorAll(".knob").forEach(bindKnob);
   refreshSelect("lead");
   applyPatch(FACTORY[0], false);
@@ -465,6 +493,23 @@ function boot(mount) {
   mount.querySelector("#try-patch").addEventListener("click", () => {
     playPhrase();
   });
+  mount.querySelector("#seq-play").addEventListener("click", () => {
+    ensureAudio();
+    seqPlaying = !seqPlaying;
+    if (seqPlaying) {
+      seqRun += 1;
+      seqIndex = 0;
+    } else seqIndex = -1;
+    paintSeq();
+    sendNow();
+    setStatus(seqPlaying ? `Secuenciador a ${seqTempo} BPM.` : "Secuenciador parado.");
+  });
+  mount.querySelector("#seq-bpm").addEventListener("input", (event) => {
+    seqTempo = clamp(Math.round(Number(event.target.value) || 120), 40, 240);
+    markDirty();
+  });
+  mount.querySelector("#mode-mono").addEventListener("click", () => setPoly(false));
+  mount.querySelector("#mode-poly").addEventListener("click", () => setPoly(true));
   mount.querySelector("#oct-down").addEventListener("click", () => shiftOctave(-12));
   mount.querySelector("#oct-up").addEventListener("click", () => shiftOctave(12));
   mount.querySelector("#mute1").addEventListener("click", () => toggleMute(1));
@@ -594,6 +639,23 @@ function boot(mount) {
             </div>
           </div>
         </div>
+        <section class="addon panel">
+          <div class="fx-row">
+            <section class="mod"><h2>Drive</h2><div class="knobs">${k("fx.drive", "Amount")}</div></section>
+            <section class="mod"><h2>Delay <em>echo</em></h2><div class="knobs">${k("fx.delay.time", "Time")}${k("fx.delay.fb", "Feedback")}${k("fx.delay.mix", "Mix")}</div></section>
+            <section class="mod"><h2>Chorus</h2><div class="knobs">${k("fx.chorus.rate", "Rate")}${k("fx.chorus.depth", "Depth")}${k("fx.chorus.mix", "Mix")}</div></section>
+          </div>
+          <div class="seq-head">
+            <h2>Secuenciador <em>16 pasos</em></h2>
+            <div class="mod-row">
+              <button class="btn primary" id="seq-play" type="button">Play</button>
+              <label class="bpm">BPM <input id="seq-bpm" type="number" min="40" max="240" step="1" value="120" aria-label="Tempo" /></label>
+            </div>
+            <div class="knobs">${k("seq.gate", "Gate")}${k("seq.swing", "Swing")}</div>
+          </div>
+          <div class="steps" id="steps"></div>
+          <p class="tiny">Clic enciende el paso. Arrastra arriba o abajo para la nota. El secuenciador usa la misma afinación que el teclado.</p>
+        </section>
         <section class="dk">
           <div class="dk-bar">
             <h2>DK KEYBOARD</h2>
@@ -601,9 +663,11 @@ function boot(mount) {
               <button class="btn" id="oct-down" type="button">Oct −</button>
               <strong id="range-label">C3 – C5</strong>
               <button class="btn" id="oct-up" type="button">Oct +</button>
+              <button class="btn primary" id="mode-mono" type="button">Mono</button>
+              <button class="btn" id="mode-poly" type="button">Poly</button>
               <button class="btn primary" id="try-patch" type="button">Probar</button>
             </div>
-            <span>Monofónico · última nota</span>
+            <span id="voice-hint">Última nota</span>
           </div>
           <div class="keys" id="keys"></div>
         </section>
@@ -625,10 +689,11 @@ function boot(mount) {
         <ul>
           <li>Elige un pin y pulsa un agujero. Otro clic con el mismo color lo quita.</li>
           <li>Para oír el teclado, la fila IN 1 / KYBD tiene que llegar a OSC 1 FREQ (el lead ya lo trae).</li>
-          <li>Arrastra el dedo por el teclado para ligar notas. Probar toca una frase con el patch actual.</li>
+          <li>Arrastra el dedo por el teclado para ligar. Mono es la última nota. Poly tiene 4 voces, cada una con su filtro y su envolvente; el oscilador 3 y la reverberación son comunes.</li>
           <li>La envolvente no es un ADSR: Attack, On (tiempo), Decay y Off. ON = 10 sostiene la tecla.</li>
           <li>Sube Response a tope y el filtro canta solo. El patch «Filtro que canta» lo hace en bucle.</li>
-          <li>Los patches viven en este navegador. Exportar guarda un JSON.</li>
+          <li>Los patches viven en este navegador. Exportar guarda un JSON, incluidos los pasos del secuenciador.</li>
+          <li>Drive, delay y chorus suenan después de la matriz. Con Mix o Amount a cero no alteran el patch.</li>
         </ul>
         <menu><button class="btn" data-close type="button">Cerrar</button></menu>
       </dialog>`;
@@ -693,6 +758,8 @@ function boot(mount) {
     paintMutes();
     paintMode();
     paintKeys();
+    paintSeq();
+    paintVoices();
     rangeEl.textContent = `${noteName(baseNote)} – ${noteName(baseNote + 24)}`;
   }
 
@@ -808,12 +875,78 @@ function boot(mount) {
     });
   }
 
+  function buildSteps() {
+    const host = mount.querySelector("#steps");
+    for (let index = 0; index < 16; index++) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "step";
+      button.dataset.index = String(index);
+      button.innerHTML = `<b></b><small>${index + 1}</small>`;
+      bindStep(button, index);
+      host.append(button);
+    }
+    paintSeq();
+  }
+
+  function bindStep(button, index) {
+    let originY = 0;
+    let originNote = 60;
+    let dragged = false;
+    button.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      button.setPointerCapture(event.pointerId);
+      originY = event.clientY;
+      originNote = steps[index].note;
+      dragged = false;
+    });
+    button.addEventListener("pointermove", (event) => {
+      if (!button.hasPointerCapture(event.pointerId)) return;
+      const delta = originY - event.clientY;
+      if (Math.abs(delta) > 6) dragged = true;
+      const next = clamp(originNote + Math.round(delta / 8), 36, 84);
+      if (next !== steps[index].note) {
+        steps[index].note = next;
+        paintSeq();
+        markDirty();
+      }
+    });
+    button.addEventListener("pointerup", () => {
+      if (dragged) return;
+      steps[index].on = !steps[index].on;
+      paintSeq();
+      markDirty();
+    });
+  }
+
+  function paintSeq() {
+    const host = mount.querySelector("#steps");
+    const play = mount.querySelector("#seq-play");
+    const bpm = mount.querySelector("#seq-bpm");
+    if (play) {
+      play.textContent = seqPlaying ? "Stop" : "Play";
+      play.classList.toggle("primary", !seqPlaying);
+    }
+    if (bpm && document.activeElement !== bpm) bpm.value = String(seqTempo);
+    host.querySelectorAll(".step").forEach((button) => {
+      const index = Number(button.dataset.index);
+      const step = steps[index];
+      button.classList.toggle("on", step.on);
+      button.classList.toggle("now", seqPlaying && index === seqIndex);
+      button.querySelector("b").textContent = noteName(step.note);
+      button.setAttribute("aria-pressed", step.on ? "true" : "false");
+      button.setAttribute("aria-label", `Paso ${index + 1}, ${noteName(step.note)}, ${step.on ? "activo" : "mudo"}`);
+    });
+  }
+
   function bindAttack(button) {
     const down = (event) => {
       event.preventDefault();
       button.setPointerCapture?.(event.pointerId);
       attackHeld = true;
       button.classList.add("down");
+      attackToken += 1;
       trigger += 1;
       syncGate(true);
     };
@@ -880,9 +1013,11 @@ function boot(mount) {
 
   function noteOn(midi, vel, id, legato = false) {
     if (!String(id).startsWith("p:")) cancelPhrase();
+    const prev = notes.get(id);
+    const token = legato && prev ? prev.token : ++noteSerial;
     if (notes.has(id)) noteOff(id, true);
     if (sustained.has(id)) sustained.delete(id);
-    notes.set(id, { midi, vel });
+    notes.set(id, { midi, vel, token });
     order.push(id);
     currentNote = midi;
     currentVel = vel;
@@ -920,6 +1055,19 @@ function boot(mount) {
     gate = attackHeld || order.length > 0;
     if (retrigger) trigger += 0;
     sendNow();
+  }
+
+  function paintVoices() {
+    mount.querySelector("#mode-mono").classList.toggle("primary", !poly);
+    mount.querySelector("#mode-poly").classList.toggle("primary", poly);
+    mount.querySelector("#voice-hint").textContent = poly ? "4 voces" : "Última nota";
+  }
+
+  function setPoly(next) {
+    poly = next;
+    paintVoices();
+    sendNow();
+    setStatus(poly ? "Poly: 4 voces, filtro y envolvente por nota." : "Mono: última nota.");
   }
 
   function onKeyDown(event) {
@@ -1075,6 +1223,10 @@ function boot(mount) {
       if (event.data?.type !== "vis") return;
       lastEnv = event.data.env;
       lastMeter = event.data.meter;
+      if (event.data.step !== seqIndex) {
+        seqIndex = event.data.step;
+        paintSeq();
+      }
       lamp.classList.toggle("lit", lastEnv > 0.04);
       const angle = -42 + Math.min(1, lastMeter * 1.6) * 84;
       needle.style.transform = `rotate(${angle}deg)`;
@@ -1122,6 +1274,17 @@ function boot(mount) {
       mute1,
       mute2,
       trigger,
+      poly: poly ? 1 : 0,
+      attack: attackHeld ? 1 : 0,
+      attackToken,
+      chord: order.map((id) => {
+        const item = notes.get(id);
+        return { id, n: item.midi, v: item.vel, token: item.token };
+      }),
+      seqPlaying,
+      seqTempo,
+      seqRun,
+      steps: steps.map((step) => (step.on ? step.note : -1)),
     });
   }
 
@@ -1133,6 +1296,11 @@ function boot(mount) {
     ch1mode = patch.ch1mode === "mic" ? "keyb" : patch.ch1mode || "keyb";
     mute1 = !!patch.mute1;
     mute2 = !!patch.mute2;
+    const seq = readSeq(patch);
+    seqTempo = seq.tempo;
+    steps = seq.steps;
+    seqPlaying = false;
+    seqIndex = -1;
     nameInput.value = patch.name || "";
     deleteBtn.disabled = !fromUser;
     paintAll();
@@ -1154,6 +1322,7 @@ function boot(mount) {
       ch1mode,
       mute1,
       mute2,
+      seq: { tempo: seqTempo, steps: steps.map((step) => ({ on: step.on, note: step.note })) },
     };
   }
 
@@ -1364,6 +1533,18 @@ function typingTarget(target) {
   return tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA";
 }
 
+function readSeq(patch) {
+  const src = patch && patch.seq;
+  if (!src || !Array.isArray(src.steps) || src.steps.length < 16) return { tempo: 120, steps: defaultSteps() };
+  return {
+    tempo: clamp(Math.round(src.tempo || 120), 40, 240),
+    steps: src.steps.slice(0, 16).map((step) => ({
+      on: !!(step && step.on),
+      note: clamp((step && step.note) || 60, 24, 96),
+    })),
+  };
+}
+
 function noteName(midi) {
   const names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
   const name = names[((midi % 12) + 12) % 12];
@@ -1377,6 +1558,15 @@ function readout(id, value) {
   if (id === "env.attack" || id === "env.decay") return formatTime(value);
   if (id === "env.on") return value >= 9.85 ? "HOLD" : formatTime(value);
   if (id === "env.off") return value >= 9.85 ? "∞" : formatTime(value);
+  if (id === "fx.delay.time") {
+    const ms = expRange(value, 40, 1000);
+    return ms < 100 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(2)} s`;
+  }
+  if (id === "fx.chorus.rate") return `${expRange(value, 0.12, 5.5).toFixed(2)} Hz`;
+  if (id === "fx.drive" || id === "fx.delay.mix" || id === "fx.delay.fb" || id === "fx.chorus.depth" || id === "fx.chorus.mix" || id === "seq.swing") {
+    return `${Math.round(value * 10)}%`;
+  }
+  if (id === "seq.gate") return `${Math.round(8 + value * 9.2)}%`;
   return value.toFixed(1);
 }
 
@@ -1434,6 +1624,15 @@ function labelOf(id) {
     "stick.y": "Joystick vertical",
     master: "Monitor",
     glide: "Slew",
+    "fx.drive": "Drive",
+    "fx.delay.time": "Delay tiempo",
+    "fx.delay.fb": "Delay feedback",
+    "fx.delay.mix": "Delay mezcla",
+    "fx.chorus.rate": "Chorus velocidad",
+    "fx.chorus.depth": "Chorus profundidad",
+    "fx.chorus.mix": "Chorus mezcla",
+    "seq.gate": "Gate del secuenciador",
+    "seq.swing": "Swing",
   };
   return names[id] || id;
 }
