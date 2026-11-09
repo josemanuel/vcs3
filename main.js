@@ -403,6 +403,10 @@ function boot(mount) {
   let poly = false;
   let noteSerial = 1;
   let attackToken = 0;
+  let bayOn = false;
+  let bayDraw = () => {};
+  let bayCap = null;
+  let baySel = null;
   let seqPlaying = false;
   let seqTempo = 120;
   let seqRun = 0;
@@ -431,6 +435,7 @@ function boot(mount) {
   buildKeys();
   buildSteps();
   mount.querySelectorAll(".knob").forEach(bindKnob);
+  buildBay();
   refreshSelect("lead");
   applyPatch(FACTORY[0], false);
   setStatus("Pulsa Probar o una tecla para oír el patch.");
@@ -472,17 +477,15 @@ function boot(mount) {
     renderMap();
     setStatus("Asignaciones propias borradas. Siguen los CC de fábrica.");
   });
-  mount.querySelector("#clear-matrix").addEventListener("click", () => {
-    pins = blankPins();
-    paintPins();
-    markDirty();
-    setStatus("Matriz vacía.");
-  });
+  mount.querySelector("#clear-matrix").addEventListener("click", clearRouting);
+  mount.querySelector("#bay-clear").addEventListener("click", clearRouting);
+  mount.querySelector("#show-matrix").addEventListener("click", () => showRouting(false));
+  mount.querySelector("#show-bay").addEventListener("click", () => showRouting(true));
   mount.querySelectorAll(".pin-choice").forEach((button) => {
-    button.addEventListener("click", () => {
-      pinColor = Number(button.dataset.pin);
-      mount.querySelectorAll(".pin-choice").forEach((item) => item.classList.toggle("on", item === button));
-    });
+    button.addEventListener("click", () => setCable(Number(button.dataset.pin)));
+  });
+  mount.querySelectorAll("[data-cable]").forEach((button) => {
+    button.addEventListener("click", () => setCable(Number(button.dataset.cable)));
   });
   mount.querySelectorAll("[data-mode]").forEach((button) => {
     button.addEventListener("click", () => setMode(button.dataset.mode));
@@ -565,16 +568,44 @@ function boot(mount) {
             <div class="case-grid">
               <section class="panel matrix-wrap">
                 <div class="matrix-head">
-                  <h2>PIN MATRIX</h2>
-                  <p>Fila = salida. Columna = entrada. Blanco y rojo a fondo; verde atenúa.</p>
+                  <div>
+                    <h2 id="route-title">PIN MATRIX</h2>
+                    <p id="route-note">Fila = salida. Columna = entrada. Blanco y rojo a fondo; verde atenúa.</p>
+                  </div>
+                  <div class="route-switch" role="group" aria-label="Vista de conexiones">
+                    <button class="btn primary" id="show-matrix" type="button">Matriz</button>
+                    <button class="btn" id="show-bay" type="button">Patchbay</button>
+                  </div>
                 </div>
-                <div class="pin-tray">
-                  <button class="pin-choice white on" data-pin="1" type="button" aria-label="Pin blanco"></button>
-                  <button class="pin-choice green" data-pin="2" type="button" aria-label="Pin verde"></button>
-                  <button class="pin-choice red" data-pin="3" type="button" aria-label="Pin rojo"></button>
-                  <button class="btn" id="clear-matrix" type="button">Vaciar</button>
+                <div id="matrix-view">
+                  <div class="pin-tray">
+                    <button class="pin-choice white on" data-pin="1" type="button" aria-label="Pin blanco"></button>
+                    <button class="pin-choice green" data-pin="2" type="button" aria-label="Pin verde"></button>
+                    <button class="pin-choice red" data-pin="3" type="button" aria-label="Pin rojo"></button>
+                    <button class="btn" id="clear-matrix" type="button">Vaciar</button>
+                  </div>
+                  <div class="matrix-scroll"><div class="matrix" id="matrix"></div></div>
                 </div>
-                <div class="matrix-scroll"><div class="matrix" id="matrix"></div></div>
+                <div id="bay-view" class="bay" hidden>
+                  <div class="bay-bar">
+                    <span>Cable</span>
+                    <button class="btn primary" type="button" data-cable="1">Blanco</button>
+                    <button class="btn" type="button" data-cable="2">Verde</button>
+                    <button class="btn" type="button" data-cable="3">Rojo</button>
+                    <button class="btn" id="bay-clear" type="button">Vaciar</button>
+                    <button class="btn" id="bay-zo" type="button" aria-label="Alejar">−</button>
+                    <button class="btn" id="bay-zi" type="button" aria-label="Acercar">+</button>
+                    <button class="btn" id="bay-zf" type="button">Ajustar</button>
+                  </div>
+                  <div class="bay-vp" id="bay-vp">
+                    <div class="bay-stage" id="bay-stage">
+                      <div class="bay-board" id="bay-board">
+                        <svg class="bay-cab" id="bay-cab"><g id="bay-cg"></g><g id="bay-pv"><path stroke="#140e09" stroke-width="9"/><path stroke="#f6f1e3" stroke-width="5"/></g></svg>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bay-hud" id="bay-hud"></div>
+                </div>
               </section>
               <div>
                 <div class="panel mods">
@@ -687,7 +718,7 @@ function boot(mount) {
       <dialog id="help-dialog">
         <h3>CÓMO SE PARCHEA</h3>
         <ul>
-          <li>Elige un pin y pulsa un agujero. Otro clic con el mismo color lo quita.</li>
+          <li>Elige un pin y pulsa un agujero. Otro clic con el mismo color lo quita. Patchbay dibuja los mismos pines como cables.</li>
           <li>Para oír el teclado, la fila IN 1 / KYBD tiene que llegar a OSC 1 FREQ (el lead ya lo trae).</li>
           <li>Arrastra el dedo por el teclado para ligar. Mono es la última nota. Poly tiene 4 voces, cada una con su filtro y su envolvente; el oscilador 3 y la reverberación son comunes.</li>
           <li>La envolvente no es un ADSR: Attack, On (tiempo), Decay y Off. ON = 10 sostiene la tecla.</li>
@@ -803,7 +834,402 @@ function boot(mount) {
 
   function paintPins() {
     matrix.querySelectorAll(".hole").forEach((hole) => paintHole(hole, pins[Number(hole.dataset.i)]));
+    if (bayOn) bayDraw();
   }
+
+  function setCable(color) {
+    pinColor = color;
+    mount.querySelectorAll(".pin-choice").forEach((item) => item.classList.toggle("on", Number(item.dataset.pin) === color));
+    mount.querySelectorAll("[data-cable]").forEach((item) => item.classList.toggle("primary", Number(item.dataset.cable) === color));
+  }
+
+  function clearRouting() {
+    pins = blankPins();
+    baySel = null;
+    paintPins();
+    markDirty();
+    setStatus("Conexiones vacías.");
+  }
+
+  function showRouting(next) {
+    bayOn = next;
+    mount.querySelector("#matrix-view").hidden = next;
+    mount.querySelector("#bay-view").hidden = !next;
+    mount.querySelector(".putney").classList.toggle("routing-bay", next);
+    mount.querySelector("#show-matrix").classList.toggle("primary", !next);
+    mount.querySelector("#show-bay").classList.toggle("primary", next);
+    mount.querySelector("#route-title").textContent = next ? "PATCHBAY" : "PIN MATRIX";
+    mount.querySelector("#route-note").textContent = next
+      ? "Mismos pines que la matriz. Salida ámbar hacia una entrada."
+      : "Fila = salida. Columna = entrada. Blanco y rojo a fondo; verde atenúa.";
+    if (next) requestAnimationFrame(() => bayFit());
+  }
+
+  function buildBay() {
+    const board = mount.querySelector("#bay-board");
+    const vp = mount.querySelector("#bay-vp");
+    const stage = mount.querySelector("#bay-stage");
+    const cg = mount.querySelector("#bay-cg");
+    const pv = mount.querySelector("#bay-pv");
+    const hudEl = mount.querySelector("#bay-hud");
+    const cables = { 1: "#f4f1ea", 2: "#1c7a42", 3: "#d01818" };
+    const jacks = {};
+    let arm = null;
+    let drag = null;
+    let zoom = 1;
+    let hintTimer = 0;
+    const el = (tag, className, html) => {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (html != null) node.innerHTML = html;
+      return node;
+    };
+    const svg = (tag, attrs) => {
+      const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+      for (const key in attrs) node.setAttribute(key, attrs[key]);
+      return node;
+    };
+    const writeKnob = (id, value) => {
+      knobs[id] = clamp(Math.round(value * 10) / 10, 0, 10);
+      lastTouched = id;
+      painters.get(id)?.();
+      markDirty();
+    };
+    const dialOf = (id, label) => {
+      const node = el("div", "bkn", `<div class="dial"><u></u></div><span>${label}</span><em></em>`);
+      node.tabIndex = 0;
+      node.setAttribute("role", "slider");
+      node.setAttribute("aria-label", label);
+      const mark = node.querySelector("u");
+      const read = node.querySelector("em");
+      const paintDial = (value) => {
+        mark.style.transform = `rotate(${-135 + value * 27}deg)`;
+        read.textContent = readout(id, value);
+        node.setAttribute("aria-valuenow", value.toFixed(1));
+      };
+      const base = painters.get(id);
+      if (base) {
+        painters.set(id, () => {
+          base();
+          paintDial(knobs[id] ?? 0);
+        });
+      }
+      let y0 = null;
+      let v0 = 0;
+      node.addEventListener("pointerdown", (event) => {
+        node.setPointerCapture(event.pointerId);
+        y0 = event.clientY;
+        v0 = knobs[id];
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      node.addEventListener("pointermove", (event) => {
+        if (y0 == null || !node.hasPointerCapture(event.pointerId)) return;
+        writeKnob(id, v0 + (y0 - event.clientY) / (event.shiftKey ? 60 : 15));
+      });
+      node.addEventListener("pointerup", () => {
+        y0 = null;
+      });
+      node.addEventListener("pointercancel", () => {
+        y0 = null;
+      });
+      node.addEventListener("dblclick", (event) => {
+        event.stopPropagation();
+        writeKnob(id, DEFAULTS[id] ?? 0);
+      });
+      node.addEventListener("keydown", (event) => {
+        const delta = { ArrowUp: 0.1, ArrowRight: 0.1, ArrowDown: -0.1, ArrowLeft: -0.1, PageUp: 1, PageDown: -1 }[event.key];
+        if (delta == null) return;
+        event.preventDefault();
+        event.stopPropagation();
+        writeKnob(id, knobs[id] + delta);
+      });
+      return node;
+    };
+    const jack = (kind, index, label) => {
+      const node = el("div", `jack ${kind}`, `<i></i><b>${label}</b>`);
+      node.dataset.k = kind;
+      node.dataset.i = String(index);
+      node.title = `${kind === "s" ? "Salida" : "Entrada"}: ${(kind === "s" ? ROWS : COLS)[index]}`;
+      jacks[kind + index] = node;
+      return node;
+    };
+    const modules = [
+      ["Oscillator 1", "sine → saw", ["osc1.freq:Frequency", "osc1.shape:Shape", "osc1.level:Level"], [[0, "Sine"], [1, "Saw"]], [[8, "Freq"]]],
+      ["Oscillator 2", "tri → pulse", ["osc2.freq:Frequency", "osc2.shape:Shape", "osc2.level:Level"], [[2, "Tri"], [3, "Pulse"]], [[9, "Freq"]]],
+      ["Oscillator 3", "lfo / audio", ["osc3.freq:Frequency", "osc3.shape:Shape", "osc3.level:Level"], [[4, "Tri"], [5, "Pulse"]], [[10, "Freq"]]],
+      ["Noise", "", ["noise.colour:Colour", "noise.level:Level"], [[6, "Noise"]], []],
+      ["Inputs", "", ["input.ch1:Channel 1", "input.ch2:Channel 2"], [[7, "In 1 / Kybd"], [8, "In 2 / Dyn"]], [], "in"],
+      ["Filter", "24 dB low pass", ["filter.freq:Frequency", "filter.response:Response", "filter.level:Level"], [[9, "Filter"]], [[7, "Input"], [13, "Freq"]]],
+      ["Ring modulator", "", ["ring.level:Level"], [[12, "Ring"]], [[4, "A"], [5, "B"]]],
+      ["Envelope shaper", "trapezoid", ["env.attack:Attack", "env.on:On", "env.decay:Decay", "env.off:Off", "env.trap:Trapezoid", "env.signal:Signal"], [[10, "Trapez."], [11, "Signal"]], [[3, "In"], [11, "Decay"]], "w2"],
+      ["Reverberation", "", ["reverb.mix:Mix", "reverb.level:Level"], [[13, "Reverb"]], [[6, "In"], [12, "Mix"]]],
+      ["Joystick", "", ["stick.rx:Horiz.", "stick.ry:Vert."], [[14, "L / R"], [15, "U / D"]], [], "joy"],
+      ["Output ch 1", "", ["out1.filter:Filter", "out1.pan:Pan", "out1.level:Level"], [], [[0, "Out"], [14, "Level"]], "m1"],
+      ["Output ch 2", "", ["out2.filter:Filter", "out2.pan:Pan", "out2.level:Level"], [], [[2, "Out"], [15, "Level"]], "m2"],
+      ["Meter", "", ["master:Monitor", "glide:Slew"], [], [[1, "Meter"]]],
+      ["Conexiones", '<span id="bay-count">0</span>', [], [], [], "help"],
+    ];
+    for (const [title, sub, knobsSpec, outputs, inputs, extra] of modules) {
+      const card = el("section", `bmod${extra === "w2" ? " w2" : ""}${extra === "help" ? " help" : ""}`, `<h2>${title}<small>${sub}</small></h2>`);
+      if (extra === "joy") {
+        const pad = el("div", "bpad", "<u></u>");
+        bayCap = pad.firstChild;
+        const move = (event) => {
+          const rect = pad.getBoundingClientRect();
+          stickX = clamp((event.clientX - rect.left) / rect.width, 0, 1) * 2 - 1;
+          stickY = clamp(1 - ((event.clientY - rect.top) / rect.height) * 2, -1, 1);
+          stickDrag = true;
+          paintStick();
+          markDirty();
+        };
+        pad.addEventListener("pointerdown", (event) => {
+          pad.setPointerCapture(event.pointerId);
+          move(event);
+          event.preventDefault();
+          event.stopPropagation();
+        });
+        pad.addEventListener("pointermove", (event) => {
+          if (pad.hasPointerCapture(event.pointerId)) move(event);
+        });
+        const release = () => {
+          if (!stickDrag) return;
+          stickDrag = false;
+          springStick();
+        };
+        pad.addEventListener("pointerup", release);
+        pad.addEventListener("pointercancel", release);
+        card.append(pad);
+      }
+      if (knobsSpec.length) {
+        const row = el("div", "bks");
+        knobsSpec.forEach((spec) => {
+          const [id, label] = spec.split(":");
+          row.append(dialOf(id, label));
+        });
+        card.append(row);
+      }
+      if (extra === "in") {
+        const toggle = el("div", "tg", '<button type="button" data-mode="keyb">KYBD</button><button type="button" data-mode="mic">MIC</button>');
+        card.append(toggle);
+      }
+      if (extra === "m1" || extra === "m2") {
+        const button = el("button", "mu", "Mute");
+        button.type = "button";
+        button.dataset.mute = extra[1];
+        button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          toggleMute(Number(extra[1]));
+        });
+        card.append(button);
+      }
+      if (extra === "help") {
+        card.append(el("p", "", "Arrastra de una salida ámbar a una entrada, o toca una y luego la otra. El parche es el de la matriz."));
+        const list = el("ul", "blst");
+        list.id = "bay-list";
+        list.addEventListener("click", (event) => {
+          const item = event.target.closest("li");
+          if (!item) return;
+          baySel = Number(item.dataset.i);
+          bayDraw();
+          bayHud();
+        });
+        card.append(list);
+      }
+      if (outputs.length || inputs.length) {
+        const row = el("div", "bjk");
+        const dest = el("div");
+        const src = el("div");
+        inputs.forEach(([index, label]) => dest.append(jack("d", index, label)));
+        outputs.forEach(([index, label]) => src.append(jack("s", index, label)));
+        row.append(dest, src);
+        card.append(row);
+      }
+      board.append(card);
+    }
+    const pos = (node) => {
+      const rect = node.getBoundingClientRect();
+      const base = board.getBoundingClientRect();
+      return { x: (rect.left + rect.width / 2 - base.left) / zoom, y: (rect.top + rect.height / 2 - base.top) / zoom };
+    };
+    const curve = (a, b) => {
+      const drop = 40 + Math.min(170, Math.hypot(b.x - a.x, b.y - a.y) * 0.3);
+      return `M${a.x} ${a.y}C${a.x} ${a.y + drop} ${b.x} ${b.y + drop} ${b.x} ${b.y}`;
+    };
+    const bayHud = (text) => {
+      if (text) {
+        hudEl.textContent = text;
+        return;
+      }
+      if (baySel != null && pins[baySel]) {
+        const value = pins[baySel];
+        hudEl.innerHTML = `<b>${ROWS[baySel >> 4]} → ${COLS[baySel & 15]}</b><button type="button" data-set="1"${value === 1 ? ' class="primary"' : ""}>Blanco</button><button type="button" data-set="2"${value === 2 ? ' class="primary"' : ""}>Verde</button><button type="button" data-set="3"${value === 3 ? ' class="primary"' : ""}>Rojo</button><button type="button" data-set="0">Borrar</button>`;
+      } else hudEl.textContent = arm ? "Toca ahora la otra clavija." : "Arrastra de una salida (ámbar) a una entrada.";
+    };
+    const hint = () => {
+      const kind = drag ? drag.j.dataset.k : arm ? arm.dataset.k : "";
+      if (kind) board.dataset.drag = kind;
+      else delete board.dataset.drag;
+    };
+    bayDraw = () => {
+      cg.replaceChildren();
+      const used = {};
+      const ids = [];
+      pins.forEach((value, index) => {
+        if (value) ids.push(index);
+      });
+      if (baySel != null && pins[baySel]) ids.push(ids.splice(ids.indexOf(baySel), 1)[0]);
+      else baySel = null;
+      ids.forEach((index) => {
+        const src = jacks[`s${index >> 4}`];
+        const dest = jacks[`d${index & 15}`];
+        if (!src || !dest) return;
+        const a = pos(src.firstChild);
+        const b = pos(dest.firstChild);
+        const d = curve(a, b);
+        const color = cables[pins[index]] || "#d01818";
+        const on = index === baySel;
+        const group = svg("g");
+        used[`s${index >> 4}`] = 1;
+        used[`d${index & 15}`] = 1;
+        const hit = svg("path", { d, class: "hit" });
+        group.append(svg("path", { d, stroke: on ? "#ffd36a" : "#140e09", "stroke-width": on ? 12 : 9 }));
+        group.append(svg("path", { d, stroke: color, "stroke-width": 5 }));
+        [a, b].forEach((point) => group.append(svg("circle", { cx: point.x, cy: point.y, r: 7, fill: color, stroke: "#140e09", "stroke-width": 2.5 })));
+        group.append(hit);
+        cg.append(group);
+        const length = hit.getTotalLength();
+        const gap = 18;
+        if (length > gap * 2 + 12) hit.style.strokeDasharray = `0 ${gap} ${length - gap * 2} ${gap}`;
+        else hit.style.display = "none";
+        hit.addEventListener("pointerdown", (event) => {
+          event.stopPropagation();
+          baySel = index;
+          arm = null;
+          bayDraw();
+          bayHud();
+        });
+      });
+      for (const key in jacks) jacks[key].classList.toggle("con", !!used[key]);
+      const count = mount.querySelector("#bay-count");
+      if (count) count.textContent = String(ids.length);
+      const list = mount.querySelector("#bay-list");
+      if (list) {
+        list.innerHTML = pins.map((value, index) => value ? `<li data-i="${index}"${index === baySel ? ' class="sel"' : ""}><i style="background:${cables[value] || "#d01818"}"></i>${ROWS[index >> 4]} → ${COLS[index & 15]}</li>` : "").join("");
+      }
+      if (!hintTimer) bayHud();
+    };
+    const connect = (a, b) => {
+      const src = a.dataset.k === "s" ? a : b;
+      const dest = src === a ? b : a;
+      const index = Number(src.dataset.i) * 16 + Number(dest.dataset.i);
+      const exists = pins[index];
+      if (!exists) pins[index] = pinColor;
+      baySel = index;
+      paintPins();
+      markDirty();
+      if (exists) {
+        bayHud("Esa conexión ya existe.");
+        clearTimeout(hintTimer);
+        hintTimer = setTimeout(() => {
+          hintTimer = 0;
+          bayHud();
+        }, 2200);
+      }
+    };
+    const preview = (x, y) => {
+      const base = board.getBoundingClientRect();
+      const a = pos(drag.j.firstChild);
+      const b = { x: (x - base.left) / zoom, y: (y - base.top) / zoom };
+      const d = curve(a, b);
+      pv.firstChild.setAttribute("d", d);
+      pv.lastChild.setAttribute("d", d);
+    };
+    vp.addEventListener("pointerdown", (event) => {
+      const hit = event.target.closest(".jack");
+      if (hit && board.contains(hit)) {
+        event.preventDefault();
+        drag = { j: hit, x: event.clientX, y: event.clientY, moved: false };
+        vp.setPointerCapture(event.pointerId);
+        hint();
+        return;
+      }
+      if (event.target.closest(".bkn, .bpad, button, .blst")) return;
+      baySel = null;
+      if (arm) {
+        arm.classList.remove("arm");
+        arm = null;
+      }
+      hint();
+      bayDraw();
+    });
+    vp.addEventListener("pointermove", (event) => {
+      if (!drag || !vp.hasPointerCapture(event.pointerId)) return;
+      if (!drag.moved && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 6) return;
+      drag.moved = true;
+      const rect = vp.getBoundingClientRect();
+      if (event.clientX < rect.left + 36) vp.scrollLeft -= 14;
+      else if (event.clientX > rect.right - 36) vp.scrollLeft += 14;
+      if (event.clientY < rect.top + 36) vp.scrollTop -= 14;
+      else if (event.clientY > rect.bottom - 36) vp.scrollTop += 14;
+      preview(event.clientX, event.clientY);
+    });
+    const endDrag = (event) => {
+      if (!drag) return;
+      const current = drag;
+      drag = null;
+      pv.firstChild.setAttribute("d", "");
+      pv.lastChild.setAttribute("d", "");
+      if (event.type === "pointerup") {
+        const found = document.elementsFromPoint(event.clientX, event.clientY).map((node) => node.closest && node.closest(".bay .jack")).find(Boolean);
+        if (current.moved) {
+          if (found && found.dataset.k !== current.j.dataset.k) connect(current.j, found);
+          if (arm) arm.classList.remove("arm");
+          arm = null;
+        } else if (arm && arm.dataset.k !== current.j.dataset.k) {
+          connect(arm, current.j);
+          arm.classList.remove("arm");
+          arm = null;
+        } else if (arm === current.j) {
+          arm.classList.remove("arm");
+          arm = null;
+        } else {
+          if (arm) arm.classList.remove("arm");
+          arm = current.j;
+          arm.classList.add("arm");
+        }
+      }
+      hint();
+      if (!hintTimer) bayHud();
+    };
+    vp.addEventListener("pointerup", endDrag);
+    vp.addEventListener("pointercancel", endDrag);
+    hudEl.addEventListener("click", (event) => {
+      const action = event.target.dataset.set;
+      if (action == null || baySel == null) return;
+      if (action === "0") {
+        pins[baySel] = 0;
+        baySel = null;
+      } else pins[baySel] = Number(action);
+      paintPins();
+      markDirty();
+    });
+    const setZoom = (value) => {
+      zoom = clamp(value, 0.3, 1.5);
+      stage.style.width = `${board.offsetWidth * zoom}px`;
+      stage.style.height = `${board.offsetHeight * zoom}px`;
+      board.style.transform = `scale(${zoom})`;
+      if (bayOn) bayDraw();
+    };
+    bayFit = () => setZoom(Math.min(1, vp.clientWidth / board.offsetWidth));
+    mount.querySelector("#bay-zi").addEventListener("click", () => setZoom(zoom * 1.2));
+    mount.querySelector("#bay-zo").addEventListener("click", () => setZoom(zoom / 1.2));
+    mount.querySelector("#bay-zf").addEventListener("click", () => bayFit());
+    board.addEventListener("contextmenu", (event) => event.preventDefault());
+    setCable(pinColor);
+  }
+
+  function bayFit() {}
 
   function paintHole(hole, value) {
     hole.classList.remove("p1", "p2", "p3");
@@ -1009,6 +1435,10 @@ function boot(mount) {
   function paintStick() {
     stickCap.style.left = `${((stickX + 1) / 2) * 100}%`;
     stickCap.style.top = `${((1 - stickY) / 2) * 100}%`;
+    if (bayCap) {
+      bayCap.style.left = `${((stickX + 1) / 2) * 100}%`;
+      bayCap.style.top = `${((1 - stickY) / 2) * 100}%`;
+    }
   }
 
   function noteOn(midi, vel, id, legato = false) {
@@ -1073,7 +1503,15 @@ function boot(mount) {
   function onKeyDown(event) {
     if (event.repeat) return;
     if (typingTarget(event.target)) return;
-    const onKnob = event.target.closest?.(".knob");
+    const onKnob = event.target.closest?.(".knob, .bkn");
+    if (bayOn && baySel != null && (event.key === "Delete" || event.key === "Backspace")) {
+      pins[baySel] = 0;
+      baySel = null;
+      paintPins();
+      markDirty();
+      event.preventDefault();
+      return;
+    }
     if (event.code === "ArrowLeft" || event.code === "ArrowRight") {
       if (onKnob) return;
       shiftOctave(event.code === "ArrowLeft" ? -12 : 12);
@@ -1187,6 +1625,11 @@ function boot(mount) {
     mount.querySelector("#mute2").classList.toggle("primary", mute2);
     mount.querySelector("#mute1").textContent = mute1 ? "Muted" : "Mute";
     mount.querySelector("#mute2").textContent = mute2 ? "Muted" : "Mute";
+    mount.querySelectorAll(".bay [data-mute]").forEach((button) => {
+      const on = button.dataset.mute === "1" ? mute1 : mute2;
+      button.classList.toggle("on", on);
+      button.textContent = on ? "Muted" : "Mute";
+    });
   }
 
   function ensureAudio() {
